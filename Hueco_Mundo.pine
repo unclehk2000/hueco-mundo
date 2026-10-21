@@ -1,0 +1,549 @@
+//@version=6
+// This Source Code Form is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Unclehk2000
+//
+// Hueco Mundo (虚圏 · the world of Hollows): the economic-calendar models in one indicator.
+// Each model is its own library, imported below, the way NWOG / NDOG imports OpenGaps:
+//   Desgarrón: NFP day (Model 6) · Gran Rey Cero: CPI day and the day after (7–8) · Vizard: FOMC day and day 1 (9–10)
+//   · Hollow: NFP week and the day after FOMC (11–12).
+// Each module draws its structure on its own days. The cards and the indicator pane follow one module at a time: the one
+// whose day is today or comes next (TradingView keeps one table per corner), or the one you pin in View.
+// The chart data each module needs is requested here once and handed to every module.
+// Publish the four libraries first (private is fine), then this script. After a library update, raise its version below.
+// Concepts: ICT (Michael J. Huddleston). Written from scratch.
+
+indicator("Hueco Mundo", "Hueco Mundo", overlay = false, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_polylines_count = 100)
+
+import Unclehk2000/HM_Desgarron/1 as des
+import Unclehk2000/HM_GranRey/1 as grc
+import Unclehk2000/HM_Vizard/1 as viz
+import Unclehk2000/HM_Hollow/1 as hol
+
+TZ = "America/New_York"
+
+// ═══════════════════════════════════════════════════════════════ Inputs
+grpW = "View"
+paneI   = input.string("Clock + findings", "Pane", options = ["Clock + findings", "Event clock", "Findings", "Cards only"], group = grpW, tooltip = "What the indicator pane shows for the module the cards follow. Event clock: today's running range (or net move) against that module's days at the same time of day. Findings: its findings table (Desgarrón's Grimmjow, Vizard's Fed map, Hollow's Shirosaki; Gran Rey Cero has none). Cards only: an empty pane.", display = display.none)
+followI = input.string("Next event", "Cards follow", options = ["Next event", "Desgarrón", "Gran Rey Cero", "Vizard", "Hollow"], group = grpW, tooltip = "Next event: the module whose day is today, or else comes next (on a tie: Desgarrón, Gran Rey Cero, Vizard, then Hollow). Or pin one module's cards and pane.", display = display.none)
+clkMet  = input.string("Range", "Clock measure", options = ["Range", "Net move"], group = grpW, tooltip = "Range: the day's high − low so far. Net move: price − the 18:00 open. Both in points, against the same measure on the module's days at this time.", display = display.none)
+themeI  = input.string("Auto", "Theme", options = ["Auto", "Dark", "Light"], group = grpW, tooltip = "Auto follows the chart background.", display = display.none)
+layI    = input.string("Desktop", "Layout", options = ["Desktop", "Mobile"], group = grpW, tooltip = "Desktop: every row. Mobile: narrow cards for a phone screen; the full wording stays in the tooltips.", display = display.none)
+crdSzI  = input.string("Small", "Card text", options = ["Tiny", "Small", "Normal"], group = grpW, display = display.none)
+
+grpO = "Modules"
+onD = input.bool(true, "Desgarrón", group = grpO, tooltip = "NFP day (Model 6). Off: none of its structure, cards or pane, and it stops running.", display = display.none)
+onG = input.bool(true, "Gran Rey Cero", group = grpO, tooltip = "CPI day and the day after (Models 7–8). Off: none of its structure, cards or pane, and it stops running.", display = display.none)
+onV = input.bool(true, "Vizard", group = grpO, tooltip = "FOMC day and day 1 (Models 9–10). Off: none of its structure, cards or pane, and it stops running.", display = display.none)
+onH = input.bool(true, "Hollow", group = grpO, tooltip = "NFP week and the day after FOMC (Models 11–12). Off: none of its structure, cards or pane, and it stops running.", display = display.none)
+
+grpE = "Event day"
+anchorI  = input.string("Trading day (18:00)", "Day", options = ["Trading day (18:00)", "NY midnight", "RTH (09:30–16:14)"], group = grpE, tooltip = "Which day counts as the event day for the tallies and Gran Rey Cero's candles.\nTrading day: the CME day, 18:00 to 17:00 ET, as the futures settle.\nNY midnight: 00:00 to 17:00 ET.\nRTH: 09:30 to 16:14 ET.", display = display.none)
+markEv   = input.bool(true, "Mark releases", group = grpE, inline = "g3", display = display.none)
+markD    = input.int(90, "and model structure for the last (days)", minval = 5, maxval = 400, group = grpE, inline = "g3", display = display.none)
+
+grpR = "Cards"
+showEv  = input.bool(true, "Event tally", group = grpR, inline = "r1", display = display.none)
+crdPos  = input.string("Top right", "", options = ["Top left", "Top center", "Top right", "Middle left", "Middle right", "Bottom left", "Bottom center", "Bottom right"], group = grpR, inline = "r1", display = display.none)
+talN    = input.int(12, "last", minval = 3, maxval = 60, group = grpR, inline = "r1", tooltip = "The last N days of the module's event: up / down closes and the average RTH gap; where price sits in this week's and this month's range.", display = display.none)
+showSg  = input.bool(true, "Stages card", group = grpR, inline = "v0", display = display.none)
+sgOn    = input.string("Price chart", "", options = ["Price chart", "Indicator pane"], group = grpR, inline = "v0", display = display.none)
+sgPos   = input.string("Bottom left", "", options = ["Top left", "Top center", "Top right", "Middle left", "Middle right", "Bottom left", "Bottom center", "Bottom right"], group = grpR, inline = "v0", display = display.none)
+showCk  = input.bool(true, "Clock card", group = grpR, inline = "r3", display = display.none)
+ckOn    = input.string("Indicator pane", "", options = ["Price chart", "Indicator pane"], group = grpR, inline = "r3", display = display.none)
+ckPos   = input.string("Top right", "", options = ["Top left", "Top center", "Top right", "Middle left", "Middle right", "Bottom left", "Bottom center", "Bottom right"], group = grpR, inline = "r3", display = display.none)
+fdgPos  = input.string("Top left", "Findings table", options = ["Top left", "Top center", "Top right", "Middle left", "Middle right", "Bottom left", "Bottom center", "Bottom right"], group = grpR, tooltip = "Grimmjow, the Fed map or Shirosaki, in the indicator pane.", display = display.none)
+
+grpK = "Event clock"
+kBands = input.bool(true, "10–90 and 25–75 bands", group = grpK, display = display.none)
+kRef   = input.bool(true, "Reference path", group = grpK, tooltip = "On the module's days: the normal-day median. On other days: the next event's median.", display = display.none)
+kPast  = input.bool(true, "Earlier days, faded", group = grpK, display = display.none)
+
+grpM = "Data"
+dxySym  = input.symbol("TVC:DXY", "DXY", group = grpM, inline = "m0", display = display.none)
+vixSym  = input.symbol("CBOE:VIX", "VIX", group = grpM, inline = "m0", display = display.none)
+ylSym   = input.symbol("TVC:US10Y", "10Y", group = grpM, inline = "m1", display = display.none)
+fdRoot  = input.string("CBOT:ZQ", "Fed funds", group = grpM, inline = "m1", tooltip = "DXY, VIX and the 10-year yield are read for every module; the 30-day fed funds contracts (17 months, CBOT:ZQZ2026 = Dec 2026) for Vizard's Fed card and map.", display = display.none)
+
+// ── Desgarrón
+d_showStr = input.bool(true, "Draw the model's levels and windows", group = "Desgarrón · Model structure", display = display.none)
+d_cLvl = input.color(#ffb300, "Levels", group = "Desgarrón · Model structure", inline = "d_s1", display = display.none)
+d_cGh = input.color(#ff7043, "Model", group = "Desgarrón · Model structure", inline = "d_s1", display = display.none)
+d_lblI = input.string("Tiny", "Labels", options = ["Tiny", "Small", "Normal"], group = "Desgarrón · Model structure", inline = "d_s1", display = display.none)
+d_showDR0 = input.bool(true, "Pre-release range 07:00–08:29", group = "Desgarrón · Model structure", inline = "d_d0", display = display.none)
+d_cDR0 = input.color(#90a4ae, "", group = "Desgarrón · Model structure", inline = "d_d0", display = display.none)
+d_stDR0 = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = "Desgarrón · Model structure", inline = "d_d0", tooltip = "Drawn live from 07:00 and fixed at 08:29. When the release takes one of its sides it stops at that bar and the 07:00–09:00 dealing range takes over.", display = display.none)
+d_showDR = input.bool(true, "Dealing range 07:00–09:00", group = "Desgarrón · Model structure", inline = "d_d1", display = display.none)
+d_cDR = input.color(#ffb300, "", group = "Desgarrón · Model structure", inline = "d_d1", display = display.none)
+d_stDR = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = "Desgarrón · Model structure", inline = "d_d1", display = display.none)
+d_wDR = input.int(1, "", minval = 1, maxval = 4, group = "Desgarrón · Model structure", inline = "d_d1", tooltip = "Created when the release breaks the pre-release range (at 09:00 if it never does): drawn from 07:00, it follows the high and low until 09:00, then stays fixed.", display = display.none)
+d_drEq = input.bool(true, "50%", group = "Desgarrón · Model structure", inline = "d_d2", display = display.none)
+d_drFill = input.bool(false, "Fill", group = "Desgarrón · Model structure", inline = "d_d2", display = display.none)
+d_drEnd = input.string("16:14", "Ranges run to", options = ["11:00", "16:14", "17:00"], group = "Desgarrón · Model structure", inline = "d_d2", display = display.none)
+d_relEnd = input.string("09:00", "Release window 08:30 →", options = ["08:45", "08:50", "09:00", "09:30"], group = "Desgarrón · Model structure", inline = "d_w0", display = display.none)
+d_cHands = input.color(color.new(#f23645, 85), "", group = "Desgarrón · Model structure", inline = "d_w0", tooltip = "Shades the release on NFP days. Model 6's hands-off window is 08:30–08:45; 09:00 covers the half hour that adds +0.14 ADR to the day's range.", display = display.none)
+d_showWO = input.bool(true, "Week open, 08:30 / 08:50 opens", group = "Desgarrón · Model structure", inline = "d_o0", display = display.none)
+d_showGap = input.bool(true, "RTH gap", group = "Desgarrón · Model structure", inline = "d_o0", tooltip = "The week's open (Sunday 18:00) and, on NFP days, the open of the 08:30 and 08:50 candles, carried right of price. RTH gap: the prior 16:14 close and the gap's 50%, from 09:30.", display = display.none)
+d_showATH = input.bool(true, "ATH", group = "Desgarrón · Model structure", inline = "d_s2", display = display.none)
+d_cAth = input.color(#ab47bc, "", group = "Desgarrón · Model structure", inline = "d_s2", display = display.none)
+d_stAth = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = "Desgarrón · Model structure", inline = "d_s2", display = display.none)
+d_showCE = input.bool(true, "08:30 CE to", group = "Desgarrón · Model structure", inline = "d_s3", display = display.none)
+d_ceEnd = input.string("Next session 11:00", "", options = ["17:00", "Next session 11:00"], group = "Desgarrón · Model structure", inline = "d_s3", tooltip = "ATH: the all-time high, drawn from the day it was set and carried right of price. CE: on NFP days at 08:30, the consequent encroachment (50%) between the ATH and the 08:29 close, carried to 17:00 or into the next session (Monday after a Friday release) to 11:00. Its label gives how often pooled NFP days touched it by then at that distance.", display = display.none)
+d_cAcD = input.color(#00897b, "Accent · DXY", group = "Desgarrón · Cards", inline = "d_r4", tooltip = "Stripe colour of the DXY rows. The tally, clock and stages cards use the Model colour.", display = display.none)
+d_cHy = input.color(#5e35b1, "Accent", group = "Desgarrón · Grimmjow: HYDRA findings", inline = "d_h0", display = display.none)
+
+// ── Gran Rey Cero
+g_showGh = input.bool(true, "Model candle", group = "Gran Rey Cero · Event day", inline = "g_g1", display = display.none)
+g_offDayI = input.string("Next event's model", "On other days", options = ["Next event's model", "Hide"], group = "Gran Rey Cero · Event day", inline = "g_g1", tooltip = "The model candle always uses this indicator's own event. On its event days it is anchored to today's open. On other days it can show the next event's model, dimmed, around today's candle (a size reference, not a forecast), or be hidden.", display = display.none)
+g_showPL = input.bool(true, "Model high / low lines", group = "Gran Rey Cero · Event day", inline = "g_g2", tooltip = "Dotted lines from the day's start to the model candle's high and low, on event days.", display = display.none)
+g_showStr = input.bool(true, "Draw the model's levels and windows", group = "Gran Rey Cero · Model structure", display = display.none)
+g_cLvl = input.color(#ffb300, "Levels", group = "Gran Rey Cero · Model structure", inline = "g_s1", display = display.none)
+g_lblI = input.string("Tiny", "Labels", options = ["Tiny", "Small", "Normal"], group = "Gran Rey Cero · Model structure", inline = "g_s1", display = display.none)
+g_showDR0 = input.bool(true, "Pre-CPI range 07:30–08:29", group = "Gran Rey Cero · Model structure", inline = "g_d0", display = display.none)
+g_cDR0 = input.color(#90a4ae, "", group = "Gran Rey Cero · Model structure", inline = "g_d0", display = display.none)
+g_stDR0 = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = "Gran Rey Cero · Model structure", inline = "g_d0", tooltip = "Stage 1: the hour before the release, drawn live from 07:30. It stops at the bar where the release first takes one of its sides (marked 1st sweep). The first side taken went on to be the day's bigger move from 08:30 on 70% of NQ CPI days (67% ES) vs 56% on normal days.", display = display.none)
+g_showDR = input.bool(true, "CPI dealing range 08:30–09:00", group = "Gran Rey Cero · Model structure", inline = "g_d1", display = display.none)
+g_cDR = input.color(#ffb300, "", group = "Gran Rey Cero · Model structure", inline = "g_d1", display = display.none)
+g_stDR = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], group = "Gran Rey Cero · Model structure", inline = "g_d1", display = display.none)
+g_wDR = input.int(1, "", minval = 1, maxval = 4, group = "Gran Rey Cero · Model structure", inline = "g_d1", tooltip = "The 08:30–09:00 high and low, drawn live through the window, then fixed at 09:00 and carried right to the end you pick.", display = display.none)
+g_drEq = input.bool(true, "CE (50%)", group = "Gran Rey Cero · Model structure", inline = "g_d2", display = display.none)
+g_drFill = input.bool(false, "Fill", group = "Gran Rey Cero · Model structure", inline = "g_d2", display = display.none)
+g_drEnd = input.string("17:00", "Run to", options = ["11:00", "16:14", "17:00"], group = "Gran Rey Cero · Model structure", inline = "g_d2", tooltip = "17:00 = the end of the CME trading day.", display = display.none)
+g_showWkO = input.bool(true, "NQ · ES · RTY vs week open at 08:30 and 09:30", group = "Gran Rey Cero · Model structure", tooltip = "One readout under the release: each index against its own week open (Sunday 18:00), at 08:30 and at the 09:30 open, the SMT idea behind Genjutsu Kai. Micro charts read MNQ · MES · M2K.", display = display.none)
+g_relLenI = input.string("1 min", "08:30 candle", options = ["1 min", "5 min", "15 min"], group = "Gran Rey Cero · Model structure", inline = "g_s2", tooltip = "The CPI release candle kept and extended to the right. On a chart above this timeframe the bar holding 08:30 is used. Wild / average / quiet = top / middle / bottom third of CPI release candles of the same length since 2018, as a share of ADR20.", display = display.none)
+g_relKeep = input.int(6, "keep last", minval = 1, maxval = 30, group = "Gran Rey Cero · Model structure", inline = "g_s2", display = display.none)
+g_showWin = input.bool(false, "08:30–09:00 box", group = "Gran Rey Cero · Model structure", inline = "g_s3", display = display.none)
+g_showYC = input.bool(true, "Yesterday's RTH close", group = "Gran Rey Cero · Model structure", inline = "g_s3", display = display.none)
+g_winLn = input.bool(true, "08:30 / 09:00 lines", group = "Gran Rey Cero · Model structure", inline = "g_s4", display = display.none)
+g_cWinL = input.color(#2962ff, "", group = "Gran Rey Cero · Model structure", inline = "g_s4", display = display.none)
+g_winLW = input.int(3, "width", minval = 1, maxval = 10, group = "Gran Rey Cero · Model structure", inline = "g_s4", display = display.none)
+g_winBg = input.bool(true, "Shade the window", group = "Gran Rey Cero · Model structure", inline = "g_s5", display = display.none)
+g_winDays = input.string("CPI days and the day after", "on", options = ["Every weekday", "CPI days and the day after", "CPI days"], group = "Gran Rey Cero · Model structure", inline = "g_s5", tooltip = "Full-height lines at 08:30 and 09:00 ET with the window shaded between them, in the line colour: strongest on CPI days, lighter on the day after, faint on other weekdays.", display = display.none)
+g_showNot = input.bool(true, "CPI flag and day wording", group = "Gran Rey Cero · Model structure", inline = "g_s6", display = display.none)
+g_cNote = input.color(#e53935, "", group = "Gran Rey Cero · Model structure", inline = "g_s6", display = display.none)
+g_noteSzI = input.string("Small", "", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = "Gran Rey Cero · Model structure", inline = "g_s6", display = display.none)
+g_noteUp = input.int(12, "height", minval = 0, maxval = 300, group = "Gran Rey Cero · Model structure", inline = "g_s6", tooltip = "CPI day: a flag above the release bar, tied by a stem to the 08:30 open; it rises with the release push to 09:00. The day after and other days get a quiet tag instead. Height = % of ADR20 above the bar's high. Leave a wording box empty to hide that day's tag.", display = display.none)
+g_txCPI = input.string("here we go folks", "CPI day", group = "Gran Rey Cero · Model structure", display = display.none)
+g_txAft = input.string("you just missed me folks", "Day after", group = "Gran Rey Cero · Model structure", display = display.none)
+g_txOth = input.string("", "Other days", group = "Gran Rey Cero · Model structure", display = display.none)
+g_showWk = input.bool(true, "Weekly candle", group = "Gran Rey Cero · PO3 candles", inline = "g_c0", display = display.none)
+g_showCh = input.bool(true, "Chips", group = "Gran Rey Cero · PO3 candles", inline = "g_c0", display = display.none)
+g_chSzI = input.string("Small", "", options = ["Tiny", "Small", "Normal"], group = "Gran Rey Cero · PO3 candles", inline = "g_c0", tooltip = "Chips: each candle's range in points. The daily chip adds the model's range and how much of it today has filled.", display = display.none)
+g_offI = input.int(24, "Offset", minval = 1, maxval = 100, group = "Gran Rey Cero · PO3 candles", inline = "g_c1", display = display.none)
+g_widI = input.int(8, "Width", minval = 2, maxval = 40, group = "Gran Rey Cero · PO3 candles", inline = "g_c1", display = display.none)
+g_gapI = input.int(10, "Gap", minval = 1, maxval = 40, group = "Gran Rey Cero · PO3 candles", inline = "g_c1", tooltip = "Offset from the last bar, today's candle width and the gap between the daily and weekly slots, in bars. The model candle is 6 bars wider than today's candle.", display = display.none)
+g_cUp = input.color(#4caf50, "Body", group = "Gran Rey Cero · PO3 candles", inline = "g_c2", display = display.none)
+g_cDn = input.color(#131722, "", group = "Gran Rey Cero · PO3 candles", inline = "g_c2", display = display.none)
+g_cWk = input.color(#787b86, "Wick", group = "Gran Rey Cero · PO3 candles", inline = "g_c2", display = display.none)
+g_cGh = input.color(#e53935, "Model", group = "Gran Rey Cero · PO3 candles", inline = "g_c2", display = display.none)
+g_showPx = input.bool(true, "Prices", group = "Gran Rey Cero · PO3 candles", inline = "g_c3", display = display.none)
+g_pxSzI = input.string("Small", "", options = ["Tiny", "Small", "Normal"], group = "Gran Rey Cero · PO3 candles", inline = "g_c3", display = display.none)
+g_showLv = input.bool(true, "Today's open / high / low lines", group = "Gran Rey Cero · PO3 candles", display = display.none)
+g_evMode = input.string("Checklist", "", options = ["Checklist", "Tally"], group = "Gran Rey Cero · Cards", inline = "g_r1", display = display.none)
+g_showVx = input.bool(true, "VIX card", group = "Gran Rey Cero · Cards", inline = "g_r2", display = display.none)
+g_showDx = input.bool(true, "DXY card", group = "Gran Rey Cero · Cards", inline = "g_r2", display = display.none)
+g_vixSize = input.bool(false, "Size the model candle by VIX", group = "Gran Rey Cero · VIX · DXY · 10Y", inline = "g_m0", tooltip = "Scales the event's median range by today's VIX: its prior close against its 20-day average and against ADR20. Fitted on 2018–24, it lifted the out-of-sample (2025–26) day-range R² from 0.24 to 0.34 on NQ and from 0.25 to 0.41 on ES. A size map, not a direction.", display = display.none)
+
+// ── Vizard
+v_showStr = input.bool(true, "Draw the model's levels and windows", group = "Vizard · Model structure", display = display.none)
+v_cLvl = input.color(#ffb300, "Levels", group = "Vizard · Model structure", inline = "v_s1", display = display.none)
+v_cGh = input.color(#ab47bc, "Model", group = "Vizard · Model structure", inline = "v_s1", display = display.none)
+v_cWin = input.color(color.new(#2962ff, 90), "Windows", group = "Vizard · Model structure", inline = "v_s1", display = display.none)
+v_showWO = input.bool(true, "Week open, 14:00 and 14:30 opens", group = "Vizard · Model structure", inline = "v_s2", tooltip = "The week's open (Sunday 18:00) and, on FOMC days, the open of the 14:00 and 14:30 candles, each extended to the right of price.", display = display.none)
+v_showSnp = input.bool(true, "Snapshots", group = "Vizard · Model structure", inline = "v_s2", tooltip = "Fixed labels on FOMC days, printed once and left where they were: at 14:00, price against the 09:30 open and the week open; at 14:30, stage 1's move and the same two distances. Needs a chart of 30 minutes or less.", display = display.none)
+v_showOct = input.bool(true, "RTH gap octants over NY AM", group = "Vizard · Model structure", inline = "v_s3", tooltip = "FOMC day: the RTH gap (prior 16:14 close → 09:30 open) in eighths from 09:30 to 11:00, the 50% line bold and the quarter next to the open shaded.", display = display.none)
+v_cOq = input.color(color.new(#26a69a, 78), "Open-side quarter", group = "Vizard · Model structure", inline = "v_s3", display = display.none)
+v_showCone = input.bool(true, "Statement shock cone", group = "Vizard · Model structure", inline = "v_s4", tooltip = "FOMC day, from the 14:00 open to 16:15: how far price had travelled by each 5 minutes on past FOMC days (2018–26), up and down separately, scaled to today's ADR20. Inner band: half of FOMC days stayed inside; outer band: 80%. Price outside the outer band = a bigger reaction than 4 in 5 past statements by that time. Before 14:00 a faint preview sits at the current price.", display = display.none)
+v_mapN = input.int(8, "Meetings", minval = 3, maxval = 10, group = "Vizard · Fed map", inline = "v_p1", display = display.none)
+v_mapMin = input.float(3.0, "rows from %", minval = 0.0, maxval = 20.0, step = 0.5, group = "Vizard · Fed map", inline = "v_p1", tooltip = "A target range gets a row once any meeting gives it at least this share (ten rows at most).", display = display.none)
+v_cHtHi = input.color(#5c6bc0, "Heat", group = "Vizard · Fed map", inline = "v_p2", display = display.none)
+v_cHtLo = input.color(color.new(#5c6bc0, 86), "→", group = "Vizard · Fed map", inline = "v_p2", display = display.none)
+v_cMapH = input.color(#283593, "Header", group = "Vizard · Fed map", inline = "v_p2", display = display.none)
+v_cMapC = input.color(#ffb300, "Today", group = "Vizard · Fed map", inline = "v_p2", tooltip = "Heat: the colour of the highest odds, then of the lowest; each cell shades between the two. Header: the title bar. Today: the marker on the current target range.", display = display.none)
+v_cAcF = input.color(#5c6bc0, "Accents · Fed", group = "Vizard · Cards", inline = "v_r4", display = display.none)
+v_cAcD = input.color(#00897b, "DXY", group = "Vizard · Cards", inline = "v_r4", tooltip = "Stripe and header colours of the Fed card and the DXY rows. The tally, clock and stages cards use the Model colour.", display = display.none)
+v_showFd = input.bool(true, "Fed card", group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f0", display = display.none)
+v_fdPos = input.string("Middle right", "", options = ["Top left", "Top center", "Top right", "Middle left", "Middle right", "Bottom left", "Bottom center", "Bottom right"], group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f0", tooltip = "Odds for the next FOMC meetings from CBOT 30-day fed funds futures, worked out with the same steps as CME FedWatch. Mobile: one row.", display = display.none)
+v_sepAs = input.string("16 Sep 2026", "Fed dots as of", group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f1", display = display.none)
+v_sepY = input.int(2026, "from", minval = 2025, maxval = 2035, group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f1", display = display.none)
+v_sep1 = input.float(4.125, "Year-end medians", step = 0.125, group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f2", display = display.none)
+v_sep2 = input.float(4.125, "", step = 0.125, group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f2", display = display.none)
+v_sep3 = input.float(3.875, "", step = 0.125, group = "Vizard · Fed odds · 30-day fed funds futures", inline = "v_f2", tooltip = "The Fed's dot plot: median year-end federal funds rate in the latest Summary of Economic Projections, for the first year and the two after (midpoint of the target range). Defaults read off the 16 Sep 2026 dot plot: 4.125 (2026), 4.125 (2027), 3.875 (2028). Update after each SEP (March, June, September, December). The Fed map sets them beside the market's path.", display = display.none)
+
+// ── Hollow
+h_showStr = input.bool(true, "Draw the model's levels and windows", group = "Hollow · Model structure", display = display.none)
+h_cLvl = input.color(#ffb300, "Levels", group = "Hollow · Model structure", inline = "h_s1", display = display.none)
+h_cGh = input.color(#26a69a, "Model", group = "Hollow · Model structure", inline = "h_s1", display = display.none)
+h_lblI = input.string("Tiny", "Labels", options = ["Tiny", "Small", "Normal"], group = "Hollow · Model structure", inline = "h_s1", display = display.none)
+h_showNW = input.bool(true, "NFP week's opening gap", group = "Hollow · Model structure", inline = "h_n0", display = display.none)
+h_cNW = input.color(#ffb300, "", group = "Hollow · Model structure", inline = "h_n0", display = display.none)
+h_stNW = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = "Hollow · Model structure", inline = "h_n0", tooltip = "The prior week's last close and Sunday's 18:00 open (dotted), with the midpoint, drawn to the NFP release.", display = display.none)
+h_showFH = input.bool(true, "FOMC high / low the day after", group = "Hollow · Model structure", inline = "h_f0", display = display.none)
+h_cFH = input.color(#ffb300, "", group = "Hollow · Model structure", inline = "h_f0", display = display.none)
+h_stFH = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], group = "Hollow · Model structure", inline = "h_f0", tooltip = "The FOMC day's high and low (its 18:00–17:00 session), carried through the next day to 16:14. Shirosaki's FH / FL rows are how often the next RTH took them.", display = display.none)
+h_showOct = input.bool(true, "Day after FOMC: gap octants over NY AM", group = "Hollow · Model structure", inline = "h_s3", tooltip = "The day after FOMC: its RTH gap (FOMC day's 16:14 close → 09:30 open) in eighths from 09:30 to 11:00, the 50% line bold and the quarter next to the open shaded.", display = display.none)
+h_cOq = input.color(color.new(#26a69a, 78), "", group = "Hollow · Model structure", inline = "h_s3", display = display.none)
+h_showSet = input.bool(true, "NFP week: settlement window 16:15–17:00", group = "Hollow · Model structure", inline = "h_w0", display = display.none)
+h_cWin = input.color(color.new(#2962ff, 90), "", group = "Hollow · Model structure", inline = "h_w0", display = display.none)
+h_showWO = input.bool(true, "Week open", group = "Hollow · Model structure", inline = "h_o0", display = display.none)
+h_showGap = input.bool(true, "RTH gap", group = "Hollow · Model structure", inline = "h_o0", tooltip = "The week's open (Sunday 18:00), carried right of price. RTH gap: the prior 16:14 close and the gap's 50% on Hollow days, from 09:30.", display = display.none)
+h_cAcD = input.color(#78909c, "Accent · DXY", group = "Hollow · Cards", inline = "h_r4", tooltip = "Stripe colour of the DXY rows. The tally, clock and stages cards use the Model colour.", display = display.none)
+h_cSh = input.color(#546e7a, "Accent", group = "Hollow · Shirosaki: HYDRA findings", inline = "h_h0", display = display.none)
+
+// ═══════════════════════════════════════════════════════════════ Chart data, requested once for every module
+dateKey(int t) => year(t, TZ) * 10000 + month(t, TZ) * 100 + dayofmonth(t, TZ)
+anchorKey(int an, int t) => an == 0 ? dateKey(t + 6 * 3600000) : dateKey(t)
+inWin(int an, int m) => an == 0 ? true : an == 1 ? m < 1020 : m >= 570 and m < 975
+winBars(int an) => an == 0 ? 92 : an == 1 ? 68 : 27
+adrCalc(int an) =>
+    var array<float> rs = array.new<float>()
+    var float o = na
+    var float h = na
+    var float l = na
+    var int   n = 0
+    int  m  = hour(time, TZ) * 60 + minute(time, TZ)
+    int  dk = anchorKey(an, time)
+    bool iw = inWin(an, m)
+    bool st = iw and (not iw[1] or dk != dk[1])
+    if st
+        if n >= 0.94 * winBars(an) and o > 0
+            rs.push((h - l) / o)
+            if rs.size() > 20
+                rs.shift()
+        o := open
+        h := high
+        l := low
+        n := 1
+    else if iw and not na(o)
+        h := math.max(h, high)
+        l := math.min(l, low)
+        n += 1
+    rs.size() >= 15 ? rs.avg() : na
+mtd() =>
+    var float h = na
+    var float l = na
+    var float o = na
+    bool  nw = na(time_tradingday[1]) or month(time_tradingday, "UTC") != month(time_tradingday[1], "UTC")
+    float pH = nw ? na : h
+    float pL = nw ? na : l
+    if nw
+        h := high
+        l := low
+        o := open
+    else
+        h := math.max(h, high)
+        l := math.min(l, low)
+    [pH, pL, o]
+athD() =>
+    float m = ta.max(high)
+    var int t = na
+    if high >= m
+        t := time
+    [m[1], t[1]]
+AN = anchorI == "Trading day (18:00)" ? 0 : anchorI == "NY midnight" ? 1 : 2
+string tfI = timeframe.isintraday ? timeframe.period : "D"
+[ADR, ADRtd] = request.security(syminfo.tickerid, "15", [adrCalc(AN), adrCalc(0)])
+[wO, wH, wL, wC] = request.security(syminfo.tickerid, "W", [open, high, low, close], lookahead = barmerge.lookahead_on)
+[moH, moL] = request.security(syminfo.tickerid, "M", [high, low], lookahead = barmerge.lookahead_on)
+[mtH, mtL, mtO] = request.security(syminfo.tickerid, "D", mtd(), lookahead = barmerge.lookahead_on)
+[athP, athPT] = request.security(syminfo.tickerid, "D", athD(), lookahead = barmerge.lookahead_on)
+float dxL = request.security(dxySym, tfI, close, ignore_invalid_symbol = true)
+[dxA, dx20] = request.security(dxySym, "D", [ta.sma(high - low, 20)[1], close[20]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[dTC, dA0, dA1] = request.security(dxySym, "D", [time_close, ta.atr(20), ta.atr(20)[1]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+float dx4 = request.security(dxySym, "W", close[1] / close[5] - 1, lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[vTC, vC0, vC1, vS0, vS1] = request.security(vixSym, "D", [time_close, close, close[1], ta.sma(close, 20), ta.sma(close, 20)[1]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+float vixL = request.security(vixSym, tfI, close, ignore_invalid_symbol = true)
+float vxC = vC1                                            // VIX's prior close and its 20-day average (completed days)
+float vxA = vS1
+[yTC, yC0, yC1] = request.security(ylSym, "D", [time_close, close, close[1]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+float ylL = request.security(ylSym, tfI, close, ignore_invalid_symbol = true)
+// NQ · ES · RTY (or MNQ · MES · M2K) and their week open, for Gran Rey Cero's readout under the CPI release
+bool   famOk = syminfo.root == "NQ" or syminfo.root == "ES" or syminfo.root == "RTY" or syminfo.root == "MNQ" or syminfo.root == "MES" or syminfo.root == "M2K"
+bool   famMc = syminfo.root == "MNQ" or syminfo.root == "MES" or syminfo.root == "M2K"
+string famSx = famOk ? str.replace(syminfo.ticker, syminfo.root, "") : "1!"
+string famPx = famOk ? syminfo.prefix : "CME_MINI"
+idxTk(int i) => famPx + ":" + (famMc ? (i == 0 ? "MNQ" : i == 1 ? "MES" : "M2K") : (i == 0 ? "NQ" : i == 1 ? "ES" : "RTY")) + famSx
+wkOpenF() =>
+    var float wo = na
+    bool nw = ta.change(time("W")) != 0
+    if nw or na(wo)
+        wo := open
+    [open, wo]
+[nqO, nqW] = request.security(idxTk(0), timeframe.period, wkOpenF(), ignore_invalid_symbol = true)
+[esO, esW] = request.security(idxTk(1), timeframe.period, wkOpenF(), ignore_invalid_symbol = true)
+[ryO, ryW] = request.security(idxTk(2), timeframe.period, wkOpenF(), ignore_invalid_symbol = true)
+// the seventeen fed funds months from the one before the last bar's month (Vizard), one dynamic request each
+var int zqY = year(last_bar_time, TZ)
+var int zqM = month(last_bar_time, TZ)
+zqTk(int i) =>
+    int t = zqY * 12 + zqM - 2 + i
+    int m = t % 12 + 1
+    fdRoot + str.substring("FGHJKMNQUVXZ", m - 1, m) + str.tostring(int(math.floor(t / 12)))
+var array<float> ZQF = array.new<float>(17, na)
+for i = 0 to 16
+    ZQF.set(i, request.security(zqTk(i), tfI, close, ignore_invalid_symbol = true))
+varip int beat = 0
+if barstate.isrealtime
+    beat += 1
+// drawings placed by bar_index are anchored through `time`; a 1-minute trading day is ~1,380 bars
+max_bars_back(time, 5000)
+
+// ═══════════════════════════════════════════════════════════════ Modules
+// ── Desgarrón
+var des.Cfg cD = des.Cfg.new(paneI = paneI == "Clock + findings" ? "Clock + Grimmjow" : paneI == "Findings" ? "Grimmjow" : paneI == "Event clock" ? "Event clock" : "Cards only", clkMet = clkMet, themeI = themeI, layI = layI, crdSzI = crdSzI, anchorI = anchorI, markEv = markEv, markD = markD, showStr = d_showStr, cLvl = d_cLvl, cGh = d_cGh, lblI = d_lblI, showDR0 = d_showDR0, cDR0 = d_cDR0, stDR0 = d_stDR0, showDR = d_showDR, cDR = d_cDR, stDR = d_stDR, wDR = d_wDR, drEq = d_drEq, drFill = d_drFill, drEnd = d_drEnd, relEnd = d_relEnd, cHands = d_cHands, showWO = d_showWO, showGap = d_showGap, showATH = d_showATH, cAth = d_cAth, stAth = d_stAth, showCE = d_showCE, ceEnd = d_ceEnd, kBands = kBands, kRef = kRef, kPast = kPast, showEv = showEv, crdPos = crdPos, talN = talN, showCk = showCk, ckOn = ckOn, ckPos = ckPos, cAcD = d_cAcD, dxySym = dxySym, vixSym = vixSym, showSg = showSg, sgOn = sgOn, sgPos = sgPos, hyPos = fdgPos, cHy = d_cHy)
+var des.Feed fD = des.Feed.new()
+var des.State sD = des.newState()
+if onD
+    fD.ADRtd := ADRtd
+    fD.wO := wO
+    fD.wH := wH
+    fD.wL := wL
+    fD.wC := wC
+    fD.dxL := dxL
+    fD.mtH := mtH
+    fD.mtL := mtL
+    fD.mtO := mtO
+    fD.dxA := dxA
+    fD.dx20 := dx20
+    fD.vxC := vxC
+    fD.vxA := vxA
+    fD.athP := athP
+    fD.athPT := athPT
+    fD.beat := beat
+    fD.dxL_1 := dxL[1]
+    des.step1(sD, cD)
+// ── Gran Rey Cero
+var grc.Cfg cG = grc.Cfg.new(paneI = paneI == "Clock + findings" ? "Event clock" : paneI == "Findings" ? "Cards only" : paneI == "Event clock" ? "Event clock" : "Cards only", clkMet = clkMet, themeI = themeI, layI = layI, crdSzI = crdSzI, anchorI = anchorI, showGh = g_showGh, offDayI = g_offDayI, showPL = g_showPL, markEv = markEv, markD = markD, showStr = g_showStr, cLvl = g_cLvl, lblI = g_lblI, showDR0 = g_showDR0, cDR0 = g_cDR0, stDR0 = g_stDR0, showDR = g_showDR, cDR = g_cDR, stDR = g_stDR, wDR = g_wDR, drEq = g_drEq, drFill = g_drFill, drEnd = g_drEnd, showWkO = g_showWkO, relLenI = g_relLenI, relKeep = g_relKeep, showWin = g_showWin, showYC = g_showYC, winLn = g_winLn, cWinL = g_cWinL, winLW = g_winLW, winBg = g_winBg, winDays = g_winDays, showNot = g_showNot, cNote = g_cNote, noteSzI = g_noteSzI, noteUp = g_noteUp, txCPI = g_txCPI, txAft = g_txAft, txOth = g_txOth, showWk = g_showWk, showCh = g_showCh, chSzI = g_chSzI, offI = g_offI, widI = g_widI, gapI = g_gapI, cUp = g_cUp, cDn = g_cDn, cWk = g_cWk, cGh = g_cGh, showPx = g_showPx, pxSzI = g_pxSzI, showLv = g_showLv, kBands = kBands, kRef = kRef, kPast = kPast, crdPos = crdPos, showEv = showEv, evMode = g_evMode, talN = talN, showVx = g_showVx, showDx = g_showDx, showCk = showCk, ckOn = ckOn, ckPos = ckPos, vixSym = vixSym, vixSize = g_vixSize, dxySym = dxySym, ylSym = ylSym)
+var grc.Feed fG = grc.Feed.new()
+var grc.State sG = grc.newState()
+if onG
+    fG.ADR := ADR
+    fG.ADRtd := ADRtd
+    fG.dx4 := dx4
+    fG.wO := wO
+    fG.wH := wH
+    fG.wL := wL
+    fG.wC := wC
+    fG.dxL := dxL
+    fG.vTC := vTC
+    fG.vC0 := vC0
+    fG.vC1 := vC1
+    fG.vS0 := vS0
+    fG.vS1 := vS1
+    fG.vixL := vixL
+    fG.dTC := dTC
+    fG.dA0 := dA0
+    fG.dA1 := dA1
+    fG.yTC := yTC
+    fG.yC0 := yC0
+    fG.yC1 := yC1
+    fG.ylL := ylL
+    fG.moH := moH
+    fG.moL := moL
+    fG.beat := beat
+    fG.nqO := nqO
+    fG.nqW := nqW
+    fG.esO := esO
+    fG.esW := esW
+    fG.ryO := ryO
+    fG.ryW := ryW
+    fG.dxL_1 := dxL[1]
+    grc.step1(sG, cG, fG)
+// ── Vizard
+var viz.Cfg cV = viz.Cfg.new(paneI = paneI == "Clock + findings" ? "Clock + Fed map" : paneI == "Findings" ? "Fed map" : paneI == "Event clock" ? "Event clock" : "Cards only", clkMet = clkMet, themeI = themeI, layI = layI, crdSzI = crdSzI, anchorI = anchorI, markEv = markEv, markD = markD, showStr = v_showStr, cLvl = v_cLvl, cGh = v_cGh, cWin = v_cWin, showWO = v_showWO, showSnp = v_showSnp, showOct = v_showOct, cOq = v_cOq, showCone = v_showCone, kBands = kBands, kRef = kRef, kPast = kPast, mapPos = fdgPos, mapN = v_mapN, mapMin = v_mapMin, cHtHi = v_cHtHi, cHtLo = v_cHtLo, cMapH = v_cMapH, cMapC = v_cMapC, showEv = showEv, crdPos = crdPos, talN = talN, showCk = showCk, ckOn = ckOn, ckPos = ckPos, cAcF = v_cAcF, cAcD = v_cAcD, dxySym = dxySym, showFd = v_showFd, fdPos = v_fdPos, fdRoot = fdRoot, sepAs = v_sepAs, sepY = v_sepY, sep1 = v_sep1, sep2 = v_sep2, sep3 = v_sep3, showSg = showSg, sgOn = sgOn, sgPos = sgPos)
+var viz.Feed fV = viz.Feed.new()
+var viz.State sV = viz.newState()
+if onV
+    fV.ADRtd := ADRtd
+    fV.wO := wO
+    fV.wH := wH
+    fV.wL := wL
+    fV.wC := wC
+    fV.dxL := dxL
+    fV.mtH := mtH
+    fV.mtL := mtL
+    fV.mtO := mtO
+    fV.dxA := dxA
+    fV.dx20 := dx20
+    fV.vxC := vxC
+    fV.vxA := vxA
+    fV.beat := beat
+    fV.ZQF := ZQF
+    fV.dxL_1 := dxL[1]
+    viz.step1(sV, cV, fV)
+// ── Hollow
+var hol.Cfg cH = hol.Cfg.new(paneI = paneI == "Clock + findings" ? "Clock + Shirosaki" : paneI == "Findings" ? "Shirosaki" : paneI == "Event clock" ? "Event clock" : "Cards only", clkMet = clkMet, themeI = themeI, layI = layI, crdSzI = crdSzI, anchorI = anchorI, markEv = markEv, markD = markD, showStr = h_showStr, cLvl = h_cLvl, cGh = h_cGh, lblI = h_lblI, showNW = h_showNW, cNW = h_cNW, stNW = h_stNW, showFH = h_showFH, cFH = h_cFH, stFH = h_stFH, showOct = h_showOct, cOq = h_cOq, showSet = h_showSet, cWin = h_cWin, showWO = h_showWO, showGap = h_showGap, kBands = kBands, kRef = kRef, kPast = kPast, showEv = showEv, crdPos = crdPos, talN = talN, showCk = showCk, ckOn = ckOn, ckPos = ckPos, cAcD = h_cAcD, dxySym = dxySym, vixSym = vixSym, showSg = showSg, sgOn = sgOn, sgPos = sgPos, shPos = fdgPos, cSh = h_cSh, skipNfpMark = onD and markEv)
+var hol.Feed fH = hol.Feed.new()
+var hol.State sH = hol.newState()
+if onH
+    fH.ADRtd := ADRtd
+    fH.wO := wO
+    fH.wH := wH
+    fH.wL := wL
+    fH.wC := wC
+    fH.dxL := dxL
+    fH.mtH := mtH
+    fH.mtL := mtL
+    fH.mtO := mtO
+    fH.dxA := dxA
+    fH.dx20 := dx20
+    fH.vxC := vxC
+    fH.vxA := vxA
+    fH.beat := beat
+    fH.dxL_1 := dxL[1]
+    hol.step1(sH, cH, fH)
+
+// which module the cards and the pane follow: the one whose day is today or comes next, or the pinned one
+int tdKm = dateKey(time + 6 * 3600000)
+pickAct() =>
+    int best = 0
+    int bk   = 99999999
+    if onD
+        int k = des.nextDay(sD)
+        if not na(k) and k < bk
+            best := 1
+            bk   := k
+    if onG
+        int k = grc.nextDay(sG)
+        if not na(k) and k < bk
+            best := 2
+            bk   := k
+    if onV
+        int k = viz.nextDay(sV)
+        if not na(k) and k < bk
+            best := 3
+            bk   := k
+    if onH
+        int k = hol.nextDay(sH)
+        if not na(k) and k < bk
+            best := 4
+            bk   := k
+    best
+var int act = 0
+if barstate.isfirst or tdKm != tdKm[1] or barstate.islast
+    act := followI == "Desgarrón" and onD ? 1 : followI == "Gran Rey Cero" and onG ? 2 : followI == "Vizard" and onV ? 3 : followI == "Hollow" and onH ? 4 : pickAct()
+cD.on := act == 1
+cG.on := act == 2
+cV.on := act == 3
+cH.on := act == 4
+
+// a module that stops being followed (the day turned) gives up its tables and last-bar drawings
+dropT(table t) =>
+    if not na(t)
+        t.delete()
+    table r = na
+    r
+dropP(array<polyline> a) =>
+    if not na(a)
+        for x in a
+            x.delete()
+        a.clear()
+dropL(array<line> a) =>
+    if not na(a)
+        for x in a
+            x.delete()
+        a.clear()
+dropLb(array<label> a) =>
+    if not na(a)
+        for x in a
+            x.delete()
+        a.clear()
+dropB(array<box> a) =>
+    if not na(a)
+        for x in a
+            x.delete()
+        a.clear()
+if barstate.islast
+    if act != 1
+        sD.s2.TV := dropT(sD.s2.TV)
+        sD.s2.TH := dropT(sD.s2.TH)
+        sD.s2.TS := dropT(sD.s2.TS)
+        sD.s2.TK := dropT(sD.s2.TK)
+        dropP(sD.s2.KP)
+        dropL(sD.s2.KL)
+        dropL(sD.s2.RL)
+        dropLb(sD.s2.KT)
+        dropLb(sD.s2.RT)
+        dropB(sD.s2.RB)
+    if act != 2
+        sG.s2.TS := dropT(sG.s2.TS)
+        sG.s2.TK := dropT(sG.s2.TK)
+        sG.s2.TM := dropT(sG.s2.TM)
+        dropP(sG.s2.KP)
+        dropL(sG.s2.KL)
+        dropL(sG.s2.RL)
+        dropLb(sG.s2.KT)
+        dropLb(sG.s2.RT)
+        dropB(sG.s2.RB)
+    if act != 3
+        sV.s2.TV := dropT(sV.s2.TV)
+        sV.s2.TS := dropT(sV.s2.TS)
+        sV.s2.TF := dropT(sV.s2.TF)
+        sV.s2.TK := dropT(sV.s2.TK)
+        sV.s2.TFM := dropT(sV.s2.TFM)
+        dropP(sV.s2.KP)
+        dropL(sV.s2.KL)
+        dropL(sV.s2.RL)
+        dropLb(sV.s2.KT)
+        dropLb(sV.s2.RT)
+        dropB(sV.s2.RB)
+    if act != 4
+        sH.s2.TV := dropT(sH.s2.TV)
+        sH.s2.TH := dropT(sH.s2.TH)
+        sH.s2.TS := dropT(sH.s2.TS)
+        sH.s2.TK := dropT(sH.s2.TK)
+        dropP(sH.s2.KP)
+        dropL(sH.s2.KL)
+        dropL(sH.s2.RL)
+        dropLb(sH.s2.KT)
+        dropLb(sH.s2.RT)
+        dropB(sH.s2.RB)
+
+// the rest of each module: structure, clock, cards
+if onD
+    des.step2(sD, cD, fD)
+    des.step3(sD, cD, fD)
+    des.step4(sD, cD)
+    des.step5(sD, cD, fD)
+    des.step6(sD, cD)
+    des.step7(sD, cD, fD)
+if onG
+    grc.step2(sG, cG, fG)
+    grc.step3(sG, cG, fG)
+    grc.step4(sG, cG, fG)
+    grc.step5(sG, cG)
+    grc.step6(sG, cG)
+    grc.step7(sG, cG)
+    grc.step8(sG, cG, fG)
+    grc.step9(sG, cG, fG)
+    grc.step10(sG, cG, fG)
+if onV
+    viz.step2(sV, cV, fV)
+    viz.step3(sV, cV, fV)
+    viz.step4(sV, cV, fV)
+    viz.step5(sV, cV, fV)
+    viz.step6(sV, cV)
+    viz.step7(sV, cV, fV)
+if onH
+    hol.step2(sH, fH)
+    hol.step3(sH, cH, fH)
+    hol.step4(sH, cH, fH)
+    hol.step5(sH, cH)
+    hol.step6(sH, cH, fH)
+    hol.step7(sH)
+
+// ═══════════════════════════════════════════════════════════════ Event clock (the followed module) and the windows
+float pT  = act == 1 ? sD.s3.p1 : act == 2 ? sG.s3.p1 : act == 3 ? sV.s2.p2 : act == 4 ? sH.s3.p2 : na
+color pTc = act == 1 ? sD.s3.pc1 : act == 2 ? sG.s3.pc1 : act == 3 ? sV.s2.pc2 : act == 4 ? sH.s3.pc2 : na
+float pE  = act == 1 ? sD.s3.p2 : act == 2 ? sG.s3.p2 : act == 3 ? sV.s2.p3 : act == 4 ? sH.s3.p3 : na
+color pEc = act == 1 ? sD.s3.pc2 : act == 2 ? sG.s3.pc2 : act == 3 ? sV.s2.pc3 : act == 4 ? sH.s3.pc3 : na
+float pH  = act == 1 ? sD.s3.p3 : act == 2 ? sG.s3.p3 : act == 3 ? sV.s2.p4 : act == 4 ? sH.s3.p4 : na
+plot(pT, "Today", color = pTc, linewidth = 3, style = plot.style_linebr, display = display.all - display.status_line)
+plot(pE, "Earlier days", color = pEc, linewidth = 1, style = plot.style_linebr, display = display.all - display.status_line)
+// invisible headroom: the scale leaves room above the bands for the cards at the top of the pane
+plot(pH, "Headroom", color = #00000000, editable = false, display = display.pane)
+bgcolor(onD ? sD.s3.bg0 : na, title = "Desgarrón · NFP release window", force_overlay = true)
+bgcolor(onG ? sG.s3.bg0 : na, title = "Gran Rey Cero · 08:30–09:00 window", force_overlay = true)
+bgcolor(onV ? sV.s2.bg0 : na, title = "Vizard · statement and press conference", force_overlay = true)
+bgcolor(onV ? sV.s2.bg1 : na, title = "Vizard · NY AM, FOMC day", force_overlay = true)
+bgcolor(onH ? sH.s3.bg0 : na, title = "Hollow · settlement window 16:15–17:00", force_overlay = true)
+bgcolor(onH ? sH.s3.bg1 : na, title = "Hollow · NY AM, the day after FOMC", force_overlay = true)
